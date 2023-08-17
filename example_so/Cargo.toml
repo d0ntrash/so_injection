@@ -1,0 +1,12 @@
+[package]
+name = "example_so"
+version = "0.1.0"
+edition = "2021"
+
+
+[lib]
+name = "example_so"
+crate-type = ["cdylib"]
+
+[dependencies]
+ctor = "0.1.13"

@@ -1,0 +1,22 @@
+#+TITLE: Linux process injection
+#+AUTHOR: d0ntrash
+** About
+Inject shared object files into running processes.
+
+Uses ptrace to interact with the running target process. Overwrites (and restores) instructions
+to either call ~dlopen~ or ~__libc_dlopen_mode~ from within the target process.
+** Example usage
+#+begin_src rust
+  use so_injection;
+
+  fn main() {
+      let so_path = "path_to_shared_object";
+      so_injection::inject_by_pid(25932, so_path);
+  }
+#+end_src
+** To do
+- Injection into (some?) multithreaded processes fails... Needs investigation
+** Credits
+- https://github.com/antifob/linux-prinj/blob/main/17-solib/inject.py
+- https://github.com/gaffe23/linux-inject/tree/master
+- https://blog.f0b.org/2022/05/process-injection-on-linux-injecting-into-processes/
