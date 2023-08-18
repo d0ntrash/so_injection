@@ -11,7 +11,10 @@ to either call ~dlopen~ or ~__libc_dlopen_mode~ from within the target process.
 
   fn main() {
       let so_path = "path_to_shared_object";
-      so_injection::inject_by_pid(25932, so_path);
+      so_injection::inject_by_name("top", so_path);
+
+      // or by pid:
+      so_injection::inject_by_pid(1337, so_path);
   }
 #+end_src
 ** To do
