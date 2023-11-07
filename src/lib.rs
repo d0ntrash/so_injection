@@ -8,16 +8,14 @@ use std::path::Path;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 
 /// Get MapRange for libc in target process
-fn get_libc_map(pid: Pid) -> Option<MapRange> {
+fn get_so_map(pid: Pid, so_name: &str) -> Option<MapRange> {
     // Get Process map
     let maps = get_process_maps(pid.into()).expect("Failed to get the process map of: {pid}");
-    let libc_filename = "libc."; // The target libc filename
     for map in maps {
         if let Some(filename) = map.filename() {
-	    println!("{:?}", filename);
             if Path::new(filename).file_name()
                 .and_then(|name| name.to_str())
-                .map(|name| name.contains(libc_filename))
+                .map(|name| name.contains(so_name))
                 .unwrap_or(false)
             {
                 return Some(map);
@@ -193,7 +191,7 @@ fn inject(pid: Pid, path: &str) {
     let absolute_path = tmp_path.to_str().unwrap();
     
     // Get map range of libc mapped in target process
-    let libc_map = get_libc_map(pid).expect("libc map not found!");
+    let libc_map = get_so_map(pid, "libc.").expect("libc map not found!");
 
     let dlopen_offset =
         get_function_offset(libc_map.filename().unwrap().to_str().unwrap(), "dlopen")
@@ -209,19 +207,51 @@ fn inject(pid: Pid, path: &str) {
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
+    use std::process::{Stdio, Command};
     use nix::unistd::Pid;
-    use crate::get_libc_map;
+    use crate::{get_so_map, inject_by_pid};
     use std::{thread, time};
+    
     #[test]
-    fn test_get_libc_map() {
+    fn test_inject_by_pid() {
+	use std::path::Path;
+	use std::env;
+	// Get the path of the example so
+	let current_dir = env::current_dir().unwrap();
+	let path = current_dir.join("target/debug/deps/libexample_so.so");
+	
 	// Start target process
-	let pid = Pid::from_raw(Command::new("sleep").arg("10000").spawn().expect("Failed to execute sleep command").id() as i32);
+	let mut child = Command::new("tail").arg("/bin/ls").arg("-f").stdout(Stdio::null()).spawn().expect("Failed to execute sleep command");
+	let pid = child.id() as i32;
+	
+	// Wait for libc to be loaded
+	thread::sleep(time::Duration::from_millis(10));
+
+	inject_by_pid(pid, path.to_str().unwrap());
+
+	// Wait for implant to be loaded
+	thread::sleep(time::Duration::from_millis(10));
+
+	let map = get_so_map(Pid::from_raw(pid), "libexample");
+	assert!(map.is_some());
+
+	// Kill target process
+	child.kill().unwrap();
+    }
+    
+    #[test]
+    fn test_get_so_map() {
+	// Start target process
+	let mut child = Command::new("tail").arg("/bin/ls").arg("-f").stdout(Stdio::null()).spawn().expect("Failed to execute sleep command");
+	let pid = child.id() as i32;
 	
 	// Wait for libc to be loaded
 	thread::sleep(time::Duration::from_millis(10));
 	
-	let map = get_libc_map(pid);
+	let map = get_so_map(Pid::from_raw(pid), "libc.");
 	assert!(map.is_some());
+
+	// Kill target process
+	child.kill().unwrap();
     }
 }
