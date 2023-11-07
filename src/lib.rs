@@ -3,17 +3,25 @@ use nix::sys::ptrace;
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
 use proc_maps::{get_process_maps, MapRange};
-use std::ffi::c_void;
+use std::{ffi::c_void, println};
+use std::path::Path;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 
 /// Get MapRange for libc in target process
 fn get_libc_map(pid: Pid) -> Option<MapRange> {
     // Get Process map
-    let maps = get_process_maps(pid.into()).unwrap();
+    let maps = get_process_maps(pid.into()).expect("Failed to get the process map of: {pid}");
+    let libc_filename = "libc."; // The target libc filename
     for map in maps {
-        if map.filename().is_some() && map.filename().unwrap().to_str().unwrap().contains("/libc.")
-        {
-            return Some(map);
+        if let Some(filename) = map.filename() {
+	    println!("{:?}", filename);
+            if Path::new(filename).file_name()
+                .and_then(|name| name.to_str())
+                .map(|name| name.contains(libc_filename))
+                .unwrap_or(false)
+            {
+                return Some(map);
+            }
         }
     }
     None
