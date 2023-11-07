@@ -1,4 +1,4 @@
-use goblin::elf::Elf;
+use goblin::elf::{Elf, Sym};
 use nix::sys::ptrace;
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
@@ -25,27 +25,29 @@ fn get_so_map(pid: Pid, so_name: &str) -> Option<MapRange> {
     None
 }
 
-/// Find a offset of a given function in a given ELF file by resolving symbols
+/// Find an offset of a given function in a given ELF file by resolving symbols
 fn get_function_offset(filename: &str, function_name: &str) -> Option<u64> {
     let data = std::fs::read(filename).expect("Cant read libc!");
-    let obj = Elf::parse(&data)
-        .map_err(|_| "cannot parse ELF file")
-        .unwrap();
-    // Iterate dyntab
-    let dyntab = obj.dynstrtab;
-    for sym in obj.dynsyms.into_iter() {
-        if (dyntab[sym.st_name]).eq(function_name) {
-            return Some(sym.st_value);
-        }
+    let obj = Elf::parse(&data).expect("Failed to parse ELF file");
+
+    fn find_offset(symtab: &goblin::elf::Symtab, strtab:  &goblin::strtab::Strtab, function_name: &str) -> Option<u64> {
+        symtab.iter().find(|sym| {
+            if let Some(Ok(name_bytes)) = strtab.get(sym.st_name as usize) {
+                if let Ok(name) = std::str::from_utf8(name_bytes.as_bytes()) {
+                    return name.trim_end_matches('\0') == function_name;
+                }
+            }
+            false
+        }).map(|sym| sym.st_value)
     }
-    // Iterate strtab
-    let strtab = obj.strtab;
-    for sym in obj.syms.into_iter() {
-        if (strtab[sym.st_name]).eq(function_name) {
-            return Some(sym.st_value);
-        }
+
+    // Try to find the function in dynsyms first
+    if let Some(offset) = find_offset(&obj.dynsyms, &obj.dynstrtab, function_name) {
+        return Some(offset);
     }
-    None
+
+    // If not found in dynsyms, search in syms
+    find_offset(&obj.syms, &obj.strtab, function_name)
 }
 
 /// Lets target process call mmap() and writes so_path to the new page
@@ -209,8 +211,25 @@ fn inject(pid: Pid, path: &str) {
 mod tests {
     use std::process::{Stdio, Command};
     use nix::unistd::Pid;
-    use crate::{get_so_map, inject_by_pid};
+    use crate::{get_so_map, inject_by_pid, inject_by_name};
     use std::{thread, time};
+
+    // #[test]
+    // fn test_inject_by_name() {
+    // 	use std::path::Path;
+    // 	use std::env;
+    // 	// Get the path of the example so
+    // 	let current_dir = env::current_dir().unwrap();
+    // 	let path = current_dir.join("target/debug/deps/libexample_so.so");
+	
+    // 	// Wait for libc to be loaded
+    // 	thread::sleep(time::Duration::from_millis(10));
+
+    // 	inject_by_name("top", path.to_str().unwrap());
+
+    // 	// Wait for implant to be loaded
+    // 	thread::sleep(time::Duration::from_millis(10));
+    // }
     
     #[test]
     fn test_inject_by_pid() {
