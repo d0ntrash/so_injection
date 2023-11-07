@@ -7,7 +7,7 @@ use std::{ffi::c_void, println};
 use std::path::Path;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 
-/// Get MapRange for libc in target process
+/// Get MapRange for `so_name` in target process
 fn get_so_map(pid: Pid, so_name: &str) -> Option<MapRange> {
     // Get Process map
     let maps = get_process_maps(pid.into()).expect("Failed to get the process map of: {pid}");
