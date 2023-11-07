@@ -206,3 +206,22 @@ fn inject(pid: Pid, path: &str) {
     // Call dlopen from target process
     call_dlopen(pid, p_dlopen, p_so_path);
 }
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+    use nix::unistd::Pid;
+    use crate::get_libc_map;
+    use std::{thread, time};
+    #[test]
+    fn test_get_libc_map() {
+	// Start target process
+	let pid = Pid::from_raw(Command::new("sleep").arg("10000").spawn().expect("Failed to execute sleep command").id() as i32);
+	
+	// Wait for libc to be loaded
+	thread::sleep(time::Duration::from_millis(10));
+	
+	let map = get_libc_map(pid);
+	assert!(map.is_some());
+    }
+}
