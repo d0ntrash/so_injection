@@ -1,4 +1,5 @@
 use goblin::elf::{Elf, Sym};
+use nix::libc::user_regs_struct;
 use nix::sys::ptrace;
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
@@ -6,6 +7,45 @@ use proc_maps::{get_process_maps, MapRange};
 use std::{ffi::c_void, println};
 use std::path::Path;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
+
+struct Snapshot {
+    registers: user_regs_struct,
+    instruction: i64,
+    pid: Pid
+}
+
+impl Snapshot {
+    fn new(pid: Pid) -> Result<Self, nix::Error>{	
+	// Get and save the current register values of the target process
+	let registers = ptrace::getregs(pid)?;
+	
+	// Save the instruction at the current rip
+	let instruction = ptrace::read(pid, registers.rip as *mut c_void)?;
+	
+	Ok(
+	    Self {
+		registers,
+		instruction,
+		pid
+	    }
+	)
+    }
+
+    fn restore(self) -> Result<(), nix::Error> {
+	// Restore the original registers
+	ptrace::setregs(self.pid, self.registers)?;
+
+	// Restore the saved instruction
+	unsafe {
+            ptrace::write(
+		self.pid,
+		self.registers.rip as *mut c_void,
+		self.instruction as *mut c_void,
+            )?
+	};
+	Ok(())
+    }
+}
 
 /// Get MapRange for `so_name` in target process
 fn get_so_map(pid: Pid, so_name: &str) -> Option<MapRange> {
@@ -59,12 +99,8 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
     // Wait until the process stops
     waitpid(pid, None)?;
 
-    // Get and save the current register values of the target process
-    let mut regs = ptrace::getregs(pid)?;
-    let regs_saved = regs.clone();
-
-    // Save the instruction at the current rip
-    let saved_instruction = ptrace::read(pid, regs.rip as *mut c_void)?;
+    let snapshot = Snapshot::new(pid)?;
+    let mut regs = snapshot.registers.clone();
 
     // Set up the registers for the mmap() system call
     regs.rax = 9; // syscall for mmap()
@@ -89,17 +125,7 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
     let mut regs_updated = ptrace::getregs(pid)?;
     let address = regs_updated.rax;
 
-    // Restore the original registers
-    ptrace::setregs(pid, regs_saved)?;
-
-    // Restore the saved instruction
-    unsafe {
-        ptrace::write(
-            pid,
-            regs_saved.rip as *mut c_void,
-            saved_instruction as *mut c_void,
-        )?
-    };
+    snapshot.restore()?;
 
     // Write the shared object path to the new page in the target process memory
     let path_bytes = so_path.as_bytes();
@@ -125,47 +151,37 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
 }
 
 /// Lets target process call dlopen to load a shared object
-pub fn call_dlopen(pid: Pid, p_dlopen: u64, p_so_path: u64) {
-    // Attaching to process
-    // Pauses process execution
-    ptrace::attach(pid).unwrap();
+pub fn call_dlopen(pid: Pid, p_dlopen: u64, p_so_path: u64) -> Result<(), nix::Error> {
+    // Attach to the target process
+    ptrace::attach(pid)?;
 
-    // Wait stops
-    waitpid(pid, None).unwrap();
+    // Wait until the process stops
+    waitpid(pid, None)?;
 
-    // Get and save current register values of target process
-    let mut regs = ptrace::getregs(pid).unwrap();
-    let regs_saved = regs;
-    let saved_instruction = ptrace::read(pid, regs.rip as *mut c_void).unwrap();
+    let snapshot = Snapshot::new(pid)?;
+    let mut regs = snapshot.registers.clone();
 
     regs.rdi = p_so_path;
     regs.rsi = 1; // RTLD_LAZY
     regs.r9 = p_dlopen;
 
-    ptrace::setregs(pid, regs).unwrap();
+    ptrace::setregs(pid, regs)?;
 
     // call r9; int 3  0xccd1ff41
     unsafe {
         ptrace::write(
             pid,
-            regs_saved.rip as *mut c_void,
+            snapshot.registers.rip as *mut c_void,
             0xccd1ff41 as *mut c_void,
-        )
-        .unwrap()
+        )?
     };
-    ptrace::cont(pid, None).unwrap();
-    waitpid(pid, None).unwrap();
+    ptrace::cont(pid, None)?;
+    waitpid(pid, None)?;
 
-    ptrace::setregs(pid, regs_saved).unwrap();
-    unsafe {
-        ptrace::write(
-            pid,
-            regs_saved.rip as *mut c_void,
-            saved_instruction as *mut c_void,
-        )
-        .unwrap()
-    };
-    ptrace::detach(pid, None).unwrap();
+    snapshot.restore()?;
+
+    ptrace::detach(pid, None)?;
+    Ok(())
 }
 
 pub fn inject_by_pid(pid: i32, path: &str) {
