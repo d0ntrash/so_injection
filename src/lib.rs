@@ -51,21 +51,22 @@ fn get_function_offset(filename: &str, function_name: &str) -> Option<u64> {
 }
 
 /// Lets target process call mmap() and writes so_path to the new page
-fn write_path_to_process(pid: Pid, so_path: &str) -> u64 {
-    // Attaching to process
-    // Pauses process execution
-    ptrace::attach(pid).unwrap();
+fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
 
-    // Wait until process stops
-    waitpid(pid, None).unwrap();
+    // Attach to the target process
+    ptrace::attach(pid)?;
 
-    // Get and save current register values of target process
-    let mut regs = ptrace::getregs(pid).unwrap();
-    let regs_saved = regs;
+    // Wait until the process stops
+    waitpid(pid, None)?;
 
-    // Save instruction which will bi overwritten
-    let saved_instruction = ptrace::read(pid, regs.rip as *mut c_void).unwrap();
+    // Get and save the current register values of the target process
+    let mut regs = ptrace::getregs(pid)?;
+    let regs_saved = regs.clone();
 
+    // Save the instruction at the current rip
+    let saved_instruction = ptrace::read(pid, regs.rip as *mut c_void)?;
+
+    // Set up the registers for the mmap() system call
     regs.rax = 9; // syscall for mmap()
     regs.rdi = 0;
     regs.rsi = so_path.len() as u64;
@@ -75,33 +76,32 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> u64 {
     regs.r9 = 0;
 
     // Overwrite registers
-    ptrace::setregs(pid, regs).unwrap();
+    ptrace::setregs(pid, regs)?;
 
-    // Overwrite instruction with syscall (0x50f)
-    unsafe { ptrace::write(pid, regs.rip as *mut c_void, 0x50f as *mut c_void).unwrap() };
+    // Overwrite the instruction with a syscall (0x50f)
+    unsafe { ptrace::write(pid, regs.rip as *mut c_void, 0x50f as *mut c_void)? };
 
-    // Execute mmap to map new page
-    ptrace::step(pid, None).unwrap();
-    waitpid(pid, None).unwrap();
+    // Execute mmap() to map a new page
+    ptrace::step(pid, None)?;
+    waitpid(pid, None)?;
 
-    // Get address of new page
-    let mut regs_updated = ptrace::getregs(pid).unwrap();
+    // Get the address of the new page
+    let mut regs_updated = ptrace::getregs(pid)?;
     let address = regs_updated.rax;
 
-    // Restore registers
-    ptrace::setregs(pid, regs_saved).unwrap();
+    // Restore the original registers
+    ptrace::setregs(pid, regs_saved)?;
 
-    // Restore saved instruction
+    // Restore the saved instruction
     unsafe {
         ptrace::write(
             pid,
             regs_saved.rip as *mut c_void,
             saved_instruction as *mut c_void,
-        )
-        .unwrap()
+        )?
     };
 
-    // Write padded string to new page
+    // Write the shared object path to the new page in the target process memory
     let path_bytes = so_path.as_bytes();
     for chunk in path_bytes.chunks(8) {
         let mut padded_chunk = [0u8; 8];
@@ -113,16 +113,15 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> u64 {
                 pid,
                 regs_updated.rax as *mut c_void,
                 u64::from_ne_bytes(padded_chunk) as *mut c_void,
-            )
-            .unwrap()
+            )?
         };
         regs_updated.rax += 8;
     }
 
-    ptrace::detach(pid, None).unwrap();
+    ptrace::detach(pid, None)?;
 
     // Return address of path in target process memory
-    address
+    Ok(address)
 }
 
 /// Lets target process call dlopen to load a shared object
@@ -201,7 +200,7 @@ fn inject(pid: Pid, path: &str) {
     let p_dlopen = libc_map.start() as u64 + dlopen_offset;
     
     // Write path string to into target process address space
-    let p_so_path = write_path_to_process(pid, &(absolute_path.to_owned() + "\x00"));
+    let p_so_path = write_path_to_process(pid, &(absolute_path.to_owned() + "\x00")).unwrap();
 
     // Call dlopen from target process
     call_dlopen(pid, p_dlopen, p_so_path);
