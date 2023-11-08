@@ -1,10 +1,11 @@
-use goblin::elf::{Elf, Sym};
+use goblin::elf::Elf;
 use nix::libc::user_regs_struct;
 use nix::sys::ptrace;
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
+use nix::Error;
 use proc_maps::{get_process_maps, MapRange};
-use std::{ffi::c_void, println};
+use std::ffi::c_void;
 use std::path::Path;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 
@@ -184,31 +185,34 @@ pub fn call_dlopen(pid: Pid, p_dlopen: u64, p_so_path: u64) -> Result<(), nix::E
     Ok(())
 }
 
-pub fn inject_by_pid(pid: i32, path: &str) {
-    inject(Pid::from_raw(pid), path);
+pub fn inject_by_pid(pid: i32, path: &str) -> Result<(), nix::Error> {
+    inject(Pid::from_raw(pid), path)?;
+    Ok(())
 }
 
-pub fn inject_by_name(process_name: &str, path: &str) {
+pub fn inject_by_name(process_name: &str, path: &str) -> Result<(), nix::Error> {
     // Get process id of target process
     let s = System::new_all();
     let pid = nix::unistd::Pid::from_raw(
         s.processes_by_exact_name(process_name)
             .next()
-            .expect("Process not found!")
+            .unwrap()
             .pid()
             .as_u32()
             .try_into()
             .unwrap(),
     );
-    inject(pid, path);
+    inject(pid, path)?;
+    Ok(())
 }
 
-fn inject(pid: Pid, path: &str) {
+fn inject(pid: Pid, path: &str) -> Result<(), Error> {
+    // TODO: Fix error handling
     let tmp_path = std::fs::canonicalize(path).unwrap();
     let absolute_path = tmp_path.to_str().unwrap();
     
     // Get map range of libc mapped in target process
-    let libc_map = get_so_map(pid, "libc.").expect("libc map not found!");
+    let libc_map = get_so_map(pid, "libc.").unwrap();
 
     let dlopen_offset =
         get_function_offset(libc_map.filename().unwrap().to_str().unwrap(), "dlopen")
@@ -219,7 +223,8 @@ fn inject(pid: Pid, path: &str) {
     let p_so_path = write_path_to_process(pid, &(absolute_path.to_owned() + "\x00")).unwrap();
 
     // Call dlopen from target process
-    call_dlopen(pid, p_dlopen, p_so_path);
+    call_dlopen(pid, p_dlopen, p_so_path)?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -261,7 +266,7 @@ mod tests {
 	// Wait for libc to be loaded
 	thread::sleep(time::Duration::from_millis(10));
 
-	inject_by_pid(pid, path.to_str().unwrap());
+	inject_by_pid(pid, path.to_str().unwrap()).unwrap();
 
 	// Wait for implant to be loaded
 	thread::sleep(time::Duration::from_millis(10));
