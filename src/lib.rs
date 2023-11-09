@@ -12,39 +12,37 @@ use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 struct Snapshot {
     registers: user_regs_struct,
     instruction: i64,
-    pid: Pid
+    pid: Pid,
 }
 
 impl Snapshot {
-    fn new(pid: Pid) -> Result<Self, nix::Error>{	
-	// Get and save the current register values of the target process
-	let registers = ptrace::getregs(pid)?;
-	
-	// Save the instruction at the current rip
-	let instruction = ptrace::read(pid, registers.rip as *mut c_void)?;
-	
-	Ok(
-	    Self {
-		registers,
-		instruction,
-		pid
-	    }
-	)
+    fn new(pid: Pid) -> Result<Self, nix::Error> {
+        // Get and save the current register values of the target process
+        let registers = ptrace::getregs(pid)?;
+
+        // Save the instruction at the current rip
+        let instruction = ptrace::read(pid, registers.rip as *mut c_void)?;
+
+        Ok(Self {
+            registers,
+            instruction,
+            pid,
+        })
     }
 
     fn restore(self) -> Result<(), nix::Error> {
-	// Restore the original registers
-	ptrace::setregs(self.pid, self.registers)?;
+        // Restore the original registers
+        ptrace::setregs(self.pid, self.registers)?;
 
-	// Restore the saved instruction
-	unsafe {
+        // Restore the saved instruction
+        unsafe {
             ptrace::write(
-		self.pid,
-		self.registers.rip as *mut c_void,
-		self.instruction as *mut c_void,
+                self.pid,
+                self.registers.rip as *mut c_void,
+                self.instruction as *mut c_void,
             )?
-	};
-	Ok(())
+        };
+        Ok(())
     }
 }
 
@@ -54,7 +52,8 @@ fn get_so_map(pid: Pid, so_name: &str) -> Option<MapRange> {
     let maps = get_process_maps(pid.into()).expect("Failed to get the process map of: {pid}");
     for map in maps {
         if let Some(filename) = map.filename() {
-            if Path::new(filename).file_name()
+            if Path::new(filename)
+                .file_name()
                 .and_then(|name| name.to_str())
                 .map(|name| name.contains(so_name))
                 .unwrap_or(false)
@@ -71,15 +70,22 @@ fn get_function_offset(filename: &str, function_name: &str) -> Option<u64> {
     let data = std::fs::read(filename).expect("Cant read libc!");
     let obj = Elf::parse(&data).expect("Failed to parse ELF file");
 
-    fn find_offset(symtab: &goblin::elf::Symtab, strtab:  &goblin::strtab::Strtab, function_name: &str) -> Option<u64> {
-        symtab.iter().find(|sym| {
-            if let Some(Ok(name_bytes)) = strtab.get(sym.st_name as usize) {
-                if let Ok(name) = std::str::from_utf8(name_bytes.as_bytes()) {
-                    return name.trim_end_matches('\0') == function_name;
+    fn find_offset(
+        symtab: &goblin::elf::Symtab,
+        strtab: &goblin::strtab::Strtab,
+        function_name: &str,
+    ) -> Option<u64> {
+        symtab
+            .iter()
+            .find(|sym| {
+                if let Some(Ok(name_bytes)) = strtab.get(sym.st_name as usize) {
+                    if let Ok(name) = std::str::from_utf8(name_bytes.as_bytes()) {
+                        return name.trim_end_matches('\0') == function_name;
+                    }
                 }
-            }
-            false
-        }).map(|sym| sym.st_value)
+                false
+            })
+            .map(|sym| sym.st_value)
     }
 
     // Try to find the function in dynsyms first
@@ -93,7 +99,6 @@ fn get_function_offset(filename: &str, function_name: &str) -> Option<u64> {
 
 /// Lets target process call mmap() and writes so_path to the new page
 fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
-
     // Attach to the target process
     ptrace::attach(pid)?;
 
@@ -210,7 +215,7 @@ fn inject(pid: Pid, path: &str) -> Result<(), Error> {
     // TODO: Fix error handling
     let tmp_path = std::fs::canonicalize(path).unwrap();
     let absolute_path = tmp_path.to_str().unwrap();
-    
+
     // Get map range of libc mapped in target process
     let libc_map = get_so_map(pid, "libc.").unwrap();
 
@@ -218,7 +223,7 @@ fn inject(pid: Pid, path: &str) -> Result<(), Error> {
         get_function_offset(libc_map.filename().unwrap().to_str().unwrap(), "dlopen")
             .expect("Function not found");
     let p_dlopen = libc_map.start() as u64 + dlopen_offset;
-    
+
     // Write path string to into target process address space
     let p_so_path = write_path_to_process(pid, &(absolute_path.to_owned() + "\x00")).unwrap();
 
@@ -229,9 +234,9 @@ fn inject(pid: Pid, path: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use std::process::{Stdio, Command};
+    use crate::{get_so_map, inject_by_name, inject_by_pid};
     use nix::unistd::Pid;
-    use crate::{get_so_map, inject_by_pid, inject_by_name};
+    use std::process::{Command, Stdio};
     use std::{thread, time};
 
     // #[test]
@@ -241,7 +246,7 @@ mod tests {
     // 	// Get the path of the example so
     // 	let current_dir = env::current_dir().unwrap();
     // 	let path = current_dir.join("target/debug/deps/libexample_so.so");
-	
+
     // 	// Wait for libc to be loaded
     // 	thread::sleep(time::Duration::from_millis(10));
 
@@ -250,47 +255,57 @@ mod tests {
     // 	// Wait for implant to be loaded
     // 	thread::sleep(time::Duration::from_millis(10));
     // }
-    
+
     #[test]
     fn test_inject_by_pid() {
-	use std::path::Path;
-	use std::env;
-	// Get the path of the example so
-	let current_dir = env::current_dir().unwrap();
-	let path = current_dir.join("target/debug/deps/libexample_so.so");
-	
-	// Start target process
-	let mut child = Command::new("tail").arg("/bin/ls").arg("-f").stdout(Stdio::null()).spawn().expect("Failed to execute sleep command");
-	let pid = child.id() as i32;
-	
-	// Wait for libc to be loaded
-	thread::sleep(time::Duration::from_millis(10));
+        use std::env;
+        use std::path::Path;
+        // Get the path of the example so
+        let current_dir = env::current_dir().unwrap();
+        let path = current_dir.join("target/debug/deps/libexample_so.so");
 
-	inject_by_pid(pid, path.to_str().unwrap()).unwrap();
+        // Start target process
+        let mut child = Command::new("tail")
+            .arg("/bin/ls")
+            .arg("-f")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("Failed to execute sleep command");
+        let pid = child.id() as i32;
 
-	// Wait for implant to be loaded
-	thread::sleep(time::Duration::from_millis(10));
+        // Wait for libc to be loaded
+        thread::sleep(time::Duration::from_millis(10));
 
-	let map = get_so_map(Pid::from_raw(pid), "libexample");
-	assert!(map.is_some());
+        inject_by_pid(pid, path.to_str().unwrap()).unwrap();
 
-	// Kill target process
-	child.kill().unwrap();
+        // Wait for implant to be loaded
+        thread::sleep(time::Duration::from_millis(10));
+
+        let map = get_so_map(Pid::from_raw(pid), "libexample");
+        assert!(map.is_some());
+
+        // Kill target process
+        child.kill().unwrap();
     }
-    
+
     #[test]
     fn test_get_so_map() {
-	// Start target process
-	let mut child = Command::new("tail").arg("/bin/ls").arg("-f").stdout(Stdio::null()).spawn().expect("Failed to execute sleep command");
-	let pid = child.id() as i32;
-	
-	// Wait for libc to be loaded
-	thread::sleep(time::Duration::from_millis(10));
-	
-	let map = get_so_map(Pid::from_raw(pid), "libc.");
-	assert!(map.is_some());
+        // Start target process
+        let mut child = Command::new("tail")
+            .arg("/bin/ls")
+            .arg("-f")
+            .stdout(Stdio::null())
+            .spawn()
+            .expect("Failed to execute sleep command");
+        let pid = child.id() as i32;
 
-	// Kill target process
-	child.kill().unwrap();
+        // Wait for libc to be loaded
+        thread::sleep(time::Duration::from_millis(10));
+
+        let map = get_so_map(Pid::from_raw(pid), "libc.");
+        assert!(map.is_some());
+
+        // Kill target process
+        child.kill().unwrap();
     }
 }
