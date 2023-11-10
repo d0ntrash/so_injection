@@ -9,6 +9,7 @@ use std::ffi::c_void;
 use std::path::Path;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
 
+/// Holds the state of the process to be restored later
 struct Snapshot {
     registers: user_regs_struct,
     instruction: i64,
@@ -16,6 +17,7 @@ struct Snapshot {
 }
 
 impl Snapshot {
+    /// Take new snapshot to save process's state
     fn new(pid: Pid) -> Result<Self, nix::Error> {
         // Get and save the current register values of the target process
         let registers = ptrace::getregs(pid)?;
@@ -30,6 +32,7 @@ impl Snapshot {
         })
     }
 
+    /// Restore snapshot from saved state
     fn restore(self) -> Result<(), nix::Error> {
         // Restore the original registers
         ptrace::setregs(self.pid, self.registers)?;
