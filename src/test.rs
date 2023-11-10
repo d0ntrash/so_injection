@@ -1,14 +1,15 @@
 #[cfg(test)]
 mod tests {
-    use crate::{get_so_map, inject_by_name, inject_by_pid};
+    use crate::{get_so_map, inject_by_pid};
     use nix::unistd::Pid;
     use std::process::{Command, Stdio};
     use std::{thread, time};
 
-    // Only used for manual testing to observe the injection in the remote process
-    // Usage: Start `tail` in another terminal befor running the test
+    // // Only used for manual testing to observe the injection in the remote process
+    // // Usage: Start `tail` in another terminal befor running the test
     // #[test]
     // fn test_inject_by_name() {
+    //  use crate::inject_by_name; 
     // 	use std::path::Path;
     // 	use std::env;
     // 	// Get the path of the example so
@@ -18,16 +19,12 @@ mod tests {
     // 	// Wait for libc to be loaded
     // 	thread::sleep(time::Duration::from_millis(10));
 
-    // 	inject_by_name("tail", path.to_str().unwrap());
-
-    // 	// Wait for implant to be loaded
-    // 	thread::sleep(time::Duration::from_millis(10));
+    // 	assert!(inject_by_name("tail", path.to_str().unwrap()).is_ok())
     // }
 
     #[test]
     fn test_inject_by_pid() {
         use std::env;
-        use std::path::Path;
         // Get the path of the example so
         let current_dir = env::current_dir().unwrap();
         let path = current_dir.join("target/debug/deps/libexample_so.so");
@@ -50,7 +47,7 @@ mod tests {
         thread::sleep(time::Duration::from_millis(10));
 
         let map = get_so_map(Pid::from_raw(pid), "libexample");
-        assert!(map.is_some());
+        assert!(map.is_ok());
 
         // Kill target process
         child.kill().unwrap();
@@ -71,7 +68,7 @@ mod tests {
         thread::sleep(time::Duration::from_millis(10));
 
         let map = get_so_map(Pid::from_raw(pid), "libc.");
-        assert!(map.is_some());
+        assert!(map.is_ok());
 
         // Kill target process
         child.kill().unwrap();

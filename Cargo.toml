@@ -8,6 +8,7 @@ edition = "2021"
 example_so = {path="./example_so"}
 
 [dependencies]
+thiserror = "1.0.50"
 sysinfo = "0.29.7"
 nix = "0.26.2"
 proc-maps = "0.3.1"

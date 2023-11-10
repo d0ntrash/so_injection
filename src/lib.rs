@@ -1,13 +1,36 @@
 use goblin::elf::Elf;
+use nix::errno::Errno;
+use thiserror::Error;
 use nix::libc::user_regs_struct;
 use nix::sys::ptrace;
 use nix::sys::wait::waitpid;
 use nix::unistd::Pid;
-use nix::Error;
 use proc_maps::{get_process_maps, MapRange};
 use std::ffi::c_void;
 use std::path::Path;
 use sysinfo::{PidExt, ProcessExt, System, SystemExt};
+
+#[cfg(test)]
+mod test;
+
+/// Main error struct for `so_injector`
+#[derive(Error, Debug)]
+pub enum InjectionError {
+    #[error("failed to get map for {0}")]
+    MapNotFound(String),
+    #[error("failed to read map file")]
+    FailedGetMap{
+	#[from]
+	source: std::io::Error,
+    },
+    #[error("ptrace error")]
+    PtraceError {
+	#[from]
+	source: Errno,
+    },
+    #[error("dlopen not found")]
+    DlopenNotFound
+}
 
 /// Holds the state of the process to be restored later
 struct Snapshot {
@@ -18,7 +41,7 @@ struct Snapshot {
 
 impl Snapshot {
     /// Take new snapshot to save process's state
-    fn new(pid: Pid) -> Result<Self, nix::Error> {
+    fn new(pid: Pid) -> Result<Self, InjectionError> {
         // Get and save the current register values of the target process
         let registers = ptrace::getregs(pid)?;
 
@@ -33,7 +56,7 @@ impl Snapshot {
     }
 
     /// Restore snapshot from saved state
-    fn restore(self) -> Result<(), nix::Error> {
+    fn restore(self) -> Result<(), InjectionError> {
         // Restore the original registers
         ptrace::setregs(self.pid, self.registers)?;
 
@@ -43,16 +66,19 @@ impl Snapshot {
                 self.pid,
                 self.registers.rip as *mut c_void,
                 self.instruction as *mut c_void,
-            )?
+            )?;
         };
         Ok(())
     }
 }
 
 /// Get MapRange for `so_name` in target process
-fn get_so_map(pid: Pid, so_name: &str) -> Option<MapRange> {
+fn get_so_map(pid: Pid, so_name: &str) -> Result<MapRange, InjectionError> {
     // Get Process map
-    let maps = get_process_maps(pid.into()).expect("Failed to get the process map of: {pid}");
+    let maps = match get_process_maps(pid.into()) {
+	Ok(map) => map,
+	Err(e) => return Err(InjectionError::FailedGetMap { source: e }),
+    };
     for map in maps {
         if let Some(filename) = map.filename() {
             if Path::new(filename)
@@ -61,11 +87,11 @@ fn get_so_map(pid: Pid, so_name: &str) -> Option<MapRange> {
                 .map(|name| name.contains(so_name))
                 .unwrap_or(false)
             {
-                return Some(map);
+                return Ok(map);
             }
         }
     }
-    None
+    Err(InjectionError::MapNotFound(so_name.to_string()))
 }
 
 /// Find an offset of a given function in a given ELF file by resolving symbols
@@ -81,7 +107,7 @@ fn get_function_offset(filename: &str, function_name: &str) -> Option<u64> {
         symtab
             .iter()
             .find(|sym| {
-                if let Some(Ok(name_bytes)) = strtab.get(sym.st_name as usize) {
+                if let Some(name_bytes) = strtab.get_at(sym.st_name as usize) {
                     if let Ok(name) = std::str::from_utf8(name_bytes.as_bytes()) {
                         return name.trim_end_matches('\0') == function_name;
                     }
@@ -101,13 +127,14 @@ fn get_function_offset(filename: &str, function_name: &str) -> Option<u64> {
 }
 
 /// Lets target process call mmap() and writes so_path to the new page
-fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
+fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, InjectionError> {
     // Attach to the target process
     ptrace::attach(pid)?;
 
     // Wait until the process stops
     waitpid(pid, None)?;
 
+    // Take snapshot
     let snapshot = Snapshot::new(pid)?;
     let mut regs = snapshot.registers.clone();
 
@@ -122,14 +149,16 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
 
     // Overwrite registers
     ptrace::setregs(pid, regs)?;
-
+ 
     // Overwrite the instruction with a syscall (0x50f)
-    unsafe { ptrace::write(pid, regs.rip as *mut c_void, 0x50f as *mut c_void)? };
+    unsafe {
+	ptrace::write(pid, regs.rip as *mut c_void, 0x50f as *mut c_void)?;
+    };
 
     // Execute mmap() to map a new page
     ptrace::step(pid, None)?;
     waitpid(pid, None)?;
-
+    
     // Get the address of the new page
     let mut regs_updated = ptrace::getregs(pid)?;
     let address = regs_updated.rax;
@@ -148,7 +177,7 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
                 pid,
                 regs_updated.rax as *mut c_void,
                 u64::from_ne_bytes(padded_chunk) as *mut c_void,
-            )?
+            )?;
         };
         regs_updated.rax += 8;
     }
@@ -160,7 +189,7 @@ fn write_path_to_process(pid: Pid, so_path: &str) -> Result<u64, nix::Error> {
 }
 
 /// Lets target process call dlopen to load a shared object
-pub fn call_dlopen(pid: Pid, p_dlopen: u64, p_so_path: u64) -> Result<(), nix::Error> {
+pub fn call_dlopen(pid: Pid, p_dlopen: u64, p_so_path: u64) -> Result<(), InjectionError> {
     // Attach to the target process
     ptrace::attach(pid)?;
 
@@ -182,29 +211,31 @@ pub fn call_dlopen(pid: Pid, p_dlopen: u64, p_so_path: u64) -> Result<(), nix::E
             pid,
             snapshot.registers.rip as *mut c_void,
             0xccd1ff41 as *mut c_void,
-        )?
+        )?;
     };
     ptrace::cont(pid, None)?;
+    
     waitpid(pid, None)?;
 
     snapshot.restore()?;
 
     ptrace::detach(pid, None)?;
+    
     Ok(())
 }
 
-pub fn inject_by_pid(pid: i32, path: &str) -> Result<(), nix::Error> {
+pub fn inject_by_pid(pid: i32, path: &str) -> Result<(), InjectionError> {
     inject(Pid::from_raw(pid), path)?;
     Ok(())
 }
 
-pub fn inject_by_name(process_name: &str, path: &str) -> Result<(), nix::Error> {
+pub fn inject_by_name(process_name: &str, path: &str) -> Result<(), InjectionError> {
     // Get process id of target process
     let s = System::new_all();
     let pid = nix::unistd::Pid::from_raw(
         s.processes_by_exact_name(process_name)
             .next()
-            .unwrap()
+            .expect("Process not found!")
             .pid()
             .as_u32()
             .try_into()
@@ -214,21 +245,22 @@ pub fn inject_by_name(process_name: &str, path: &str) -> Result<(), nix::Error> 
     Ok(())
 }
 
-fn inject(pid: Pid, path: &str) -> Result<(), Error> {
+fn inject(pid: Pid, path: &str) -> Result<(), InjectionError> {
     // TODO: Fix error handling
     let tmp_path = std::fs::canonicalize(path).unwrap();
     let absolute_path = tmp_path.to_str().unwrap();
 
     // Get map range of libc mapped in target process
-    let libc_map = get_so_map(pid, "libc.").unwrap();
+    let libc_map = get_so_map(pid, "libc.")?;
 
-    let dlopen_offset =
-        get_function_offset(libc_map.filename().unwrap().to_str().unwrap(), "dlopen")
-            .expect("Function not found");
+    let dlopen_offset = match get_function_offset(libc_map.filename().unwrap().to_str().unwrap(), "dlopen") {
+	Some(offset) => offset,
+	None => return Err(InjectionError::DlopenNotFound)
+    };
     let p_dlopen = libc_map.start() as u64 + dlopen_offset;
-
+    
     // Write path string to into target process address space
-    let p_so_path = write_path_to_process(pid, &(absolute_path.to_owned() + "\x00")).unwrap();
+    let p_so_path = write_path_to_process(pid, &(absolute_path.to_owned() + "\x00"))?;
 
     // Call dlopen from target process
     call_dlopen(pid, p_dlopen, p_so_path)?;
